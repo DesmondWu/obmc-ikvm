@@ -184,6 +184,17 @@ struct profile _wait;
 #define USBHID_KEY_UP		0x52
 #define USBHID_KEY_NUMLOCK	0x53
 
+#if 1
+#define DESPRINTF(s,...) do{char desbuff[256];char descmd[256];\
+snprintf(desbuff, sizeof(desbuff), s,__VA_ARGS__);\
+snprintf(descmd, sizeof(descmd), "ddd[%s:%d] %s\n",__func__,__LINE__,desbuff);\
+printf("%s",descmd);}while(0)
+
+#else
+#define DESTIME()
+#endif
+
+
 static volatile bool ok = true;
 pthread_cond_t cond = PTHREAD_COND_INITIALIZER;
 pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -822,7 +833,7 @@ static int get_frame(struct obmc_ikvm *ikvm)
 {
 	int rc;
 	struct v4l2_format fmt;
-
+	DESPRINTF("%s","obmc");
 	fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
 	rc = ioctl(ikvm->videodev_fd, VIDIOC_G_FMT, &fmt);
 	if (rc < 0) {
@@ -830,7 +841,8 @@ static int get_frame(struct obmc_ikvm *ikvm)
 		       strerror(errno));
 		return -EFAULT;
 	}
-
+	DESPRINTF("dfmt:%dx%d ikvm:%dx%d",fmt.fmt.pix.width,fmt.fmt.pix.height,ikvm->resolution.width,ikvm->resolution.height);
+	
 	if (fmt.fmt.pix.width != ikvm->resolution.width ||
 	    fmt.fmt.pix.height != ikvm->resolution.height) {
 		char *old_frame = ikvm->frame;
@@ -857,6 +869,9 @@ static int get_frame(struct obmc_ikvm *ikvm)
 
 		/* Get the image on the next iteration */
 		ikvm->wait_next = true;
+		pthread_mutex_unlock(&mutex);
+		DESPRINTF("%s","wait 2 sec");
+		sleep(2);
 		return 0;
 	}
 
@@ -874,36 +889,6 @@ static int get_frame(struct obmc_ikvm *ikvm)
 	send_frame_to_clients(ikvm);
 
 	return 0;
-}
-
-static int timespec_subtract(struct timespec *result, struct timespec *x,
-			     struct timespec *y)
-{
-	/* Perform the carry for the later subtraction by updating y. */
-	if (x->tv_nsec < y->tv_nsec) {
-		long long int nsec =
-			((y->tv_nsec - x->tv_nsec) / 1000000000ULL) + 1;
-
-		y->tv_nsec -= 1000000000ULL * nsec;
-		y->tv_sec += nsec;
-	}
-
-	if (x->tv_nsec - y->tv_nsec > 1000000000ULL) {
-		long long int nsec = (x->tv_nsec - y->tv_nsec) / 1000000000ULL;
-
-		y->tv_nsec += 1000000000ULL * nsec;
-		y->tv_sec -= nsec;
-	}
-
-	/*
-	 * Compute the time remaining to wait.
-	 * tv_nsec is certainly positive.
-	 */
-	result->tv_sec = x->tv_sec - y->tv_sec;
-	result->tv_nsec = x->tv_nsec - y->tv_nsec;
-
-	/* Return 1 if result is negative. */
-	return x->tv_sec < y->tv_sec;
 }
 
 static void dump_frame(struct obmc_ikvm *ikvm)
@@ -932,9 +917,9 @@ static void dump_frame(struct obmc_ikvm *ikvm)
 
 void *threaded_process_rfb(void *ptr)
 {
-	struct timespec diff;
-	struct timespec end;
-	struct timespec start;
+//	struct timespec diff;
+//	struct timespec end;
+//	struct timespec start;
 	struct obmc_ikvm *ikvm = (struct obmc_ikvm *)ptr;
 
 	while (ok) {
@@ -976,7 +961,7 @@ void usage()
 
 int main(int argc, char **argv)
 {
-	int len;
+//	int len;
 	int option;
 	int rc;
 	const char *opts = "dhi:k:p:v:";
@@ -991,9 +976,9 @@ int main(int argc, char **argv)
 		{ 0, 0, 0, 0 }
 	};
 	struct obmc_ikvm ikvm;
-	struct timespec diff;
-	struct timespec end;
-	struct timespec start;
+//	struct timespec diff;
+//	struct timespec end;
+//	struct timespec start;
 	pthread_t rfb;
 
 	memset(&ikvm, 0, sizeof(struct obmc_ikvm));
