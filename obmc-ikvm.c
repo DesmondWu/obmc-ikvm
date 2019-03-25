@@ -25,7 +25,9 @@
 #include <getopt.h>
 #include <linux/videodev2.h>
 #include <pthread.h>
+//#include <rfb/keysym.h>
 #include <rfb/keysym.h>
+
 #include <rfb/rfb.h>
 #include <rfb/rfbproto.h>
 #include <signal.h>
@@ -53,6 +55,7 @@
 #ifdef _PROFILE_
 #define PROFILE_SAMPLES		512ULL
 
+#define FIX1920
 struct profile {
 	bool rolled_over;
 	unsigned int idx;
@@ -193,8 +196,9 @@ printf("%s",descmd);}while(0)
 #else
 #define DESTIME()
 #endif
-
-
+static unsigned long init_wait=0;
+static unsigned long init_width=0;
+static unsigned long init_height=0;
 static volatile bool ok = true;
 pthread_cond_t cond = PTHREAD_COND_INITIALIZER;
 pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -244,9 +248,12 @@ static int alloc_frame(struct obmc_ikvm *ikvm, struct v4l2_format *fmt)
 {
 	ikvm->resolution.height = fmt->fmt.pix.height;
 	ikvm->resolution.width = fmt->fmt.pix.width;
-
+#if 1//def FIX1920
 	ikvm->frame_buf_size = ikvm->resolution.height *
 		ikvm->resolution.width * BYTES_PER_PIXEL;
+#else
+	ikvm->frame_buf_size = 1920 * 1080 * BYTES_PER_PIXEL;	
+#endif		
 	if (!ikvm->frame_buf_size) {
 		printf("resolution invalid\n");
 		return -ENOMEM;
@@ -285,6 +292,7 @@ static int init_videodev(struct obmc_ikvm *ikvm)
 	struct v4l2_capability cap;
         struct v4l2_format fmt;
 	struct v4l2_streamparm sparm;
+	struct v4l2_dv_timings timings;
 
 	ikvm->videodev_fd = open(ikvm->videodev_name, O_RDWR);
 	if (ikvm->videodev_fd < 0) {
@@ -346,6 +354,40 @@ static int init_videodev(struct obmc_ikvm *ikvm)
 		return -EINVAL;
 	}
 
+#if 0
+	rc = ioctl(ikvm->videodev_fd, VIDIOC_G_DV_TIMINGS, &timings);
+	if (rc < 0) {
+		printf("failed to query format: %d %s\n", errno,
+		       strerror(errno));
+		return -EFAULT;
+	}
+	DESPRINTF("dv:%dx%d ikvm:%dx%d",timings.bt.width,timings.bt.height,ikvm->resolution.width,ikvm->resolution.height);
+
+	init_width=timings.bt.width;
+	init_height=timings.bt.height;
+
+	timings.bt.width = 1920;
+	timings.bt.height = 1080;
+	init_wait=100;
+	rc = ioctl(ikvm->videodev_fd, VIDIOC_S_DV_TIMINGS, &timings);
+	if (rc < 0) {
+		printf("failed to query format: %d %s\n", errno,
+		       strerror(errno));
+		return -EFAULT;
+	}
+#if 0
+	timings.bt.width=init_width; 
+	timings.bt.height=init_height;
+	
+
+	rc = ioctl(ikvm->videodev_fd, VIDIOC_S_DV_TIMINGS, &timings);
+	if (rc < 0) {
+		printf("failed to query format: %d %s\n", errno,
+		       strerror(errno));
+		return -EFAULT;
+	}
+#endif	
+#endif
 	set_frame_rate(ikvm);
 
 	return alloc_frame(ikvm, &fmt);
@@ -760,9 +802,14 @@ static enum rfbNewClientAction new_client(rfbClientPtr cl)
 
 static int init_server(struct obmc_ikvm *ikvm, int *argc, char **argv)
 {
+#if 1//def FIX1920
 	ikvm->server = rfbGetScreen(argc, argv, ikvm->resolution.width,
 				    ikvm->resolution.height, BITS_PER_SAMPLE,
 				    SAMPLES_PER_PIXEL, BYTES_PER_PIXEL);
+#else
+	ikvm->server = rfbGetScreen(argc, argv, 1920,1080, BITS_PER_SAMPLE,
+				    SAMPLES_PER_PIXEL, BYTES_PER_PIXEL);				    
+#endif				    
 	if (!ikvm->server) {
 		printf("failed to get vnc screen\n");
 		return -ENODEV;
@@ -776,8 +823,12 @@ static int init_server(struct obmc_ikvm *ikvm, int *argc, char **argv)
 
 	rfbInitServer(ikvm->server);
 
+#if 1//def FIX1920
 	rfbMarkRectAsModified(ikvm->server, 0, 0, ikvm->resolution.width,
 			      ikvm->resolution.height);
+#else
+	rfbMarkRectAsModified(ikvm->server, 0, 0, 1920,1080);
+#endif			     
 
 	return 0;
 }
@@ -812,10 +863,12 @@ static void send_frame_to_clients(struct obmc_ikvm *ikvm)
 		rfbSendUpdateBuf(cl);
 
 		cl->tightEncoding = rfbEncodingTight;
-
+#if 1//def FIX1920
 		rfbSendTightHeader(cl, 0, 0, ikvm->resolution.width,
 				   ikvm->resolution.height);
-
+#else
+		rfbSendTightHeader(cl, 0, 0, 1920,1080);
+#endif		
 		cl->updateBuf[cl->ublen++] = (char)(rfbTightJpeg << 4);
 
 		rfbSendCompressedDataTight(cl, ikvm->frame, ikvm->frame_size);
@@ -833,8 +886,47 @@ static int get_frame(struct obmc_ikvm *ikvm)
 {
 	int rc;
 	struct v4l2_format fmt;
+	fd_set set;
+	struct timeval timeout;
+	struct v4l2_dv_timings timings;
+	int rv;
+
+	FD_ZERO(&set); /* clear the set */
+	FD_SET(ikvm->videodev_fd, &set); /* add our file descriptor to the set */
+
+	timeout.tv_sec = 0;
+	timeout.tv_usec = 2000;
+
 	DESPRINTF("%s","obmc");
 	fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+
+	
+	if(init_wait == 1)
+	{
+		
+		rc = ioctl(ikvm->videodev_fd, VIDIOC_G_DV_TIMINGS, &timings);
+		if (rc < 0) {
+			printf("failed to query format: %d %s\n", errno,
+			       strerror(errno));
+			return -EFAULT;
+		}
+		//DESPRINTF("dv:%dx%d ikvm:%dx%d",timings.bt.width,timings.bt.height,ikvm->resolution.width,ikvm->resolution.height);
+		timings.bt.width=init_width; 
+		timings.bt.height=init_height;
+		rc = ioctl(ikvm->videodev_fd, VIDIOC_S_DV_TIMINGS, &timings);
+		if (rc < 0) {
+			printf("failed to query format: %d %s\n", errno,
+			       strerror(errno));
+			return -EFAULT;
+		}
+	}		
+	else if(init_wait !=0)
+	{
+		DESPRINTF("init_wait:%d\n",init_wait);
+		init_wait--;
+	}
+
+#if 1
 	rc = ioctl(ikvm->videodev_fd, VIDIOC_G_FMT, &fmt);
 	if (rc < 0) {
 		printf("failed to query format: %d %s\n", errno,
@@ -842,7 +934,8 @@ static int get_frame(struct obmc_ikvm *ikvm)
 		return -EFAULT;
 	}
 	DESPRINTF("dfmt:%dx%d ikvm:%dx%d",fmt.fmt.pix.width,fmt.fmt.pix.height,ikvm->resolution.width,ikvm->resolution.height);
-	
+#endif	
+
 	if (fmt.fmt.pix.width != ikvm->resolution.width ||
 	    fmt.fmt.pix.height != ikvm->resolution.height) {
 		char *old_frame = ikvm->frame;
@@ -850,45 +943,107 @@ static int get_frame(struct obmc_ikvm *ikvm)
 		rc = alloc_frame(ikvm, &fmt);
 		if (rc)
 			return rc;
+#if 0			
+	sleep(2);
+	rc = ioctl(ikvm->videodev_fd, VIDIOC_G_DV_TIMINGS, &timings);
+	if (rc < 0) {
+		printf("failed to query format: %d %s\n", errno,
+		       strerror(errno));
+		return -EFAULT;
+	}
+	DESPRINTF("dv:%dx%d ikvm:%dx%d",timings.bt.width,timings.bt.height,ikvm->resolution.width,ikvm->resolution.height);
 
+	rc = ioctl(ikvm->videodev_fd, VIDIOC_S_DV_TIMINGS, &timings);
+	if (rc < 0) {
+		printf("failed to query format: %d %s\n", errno,
+		       strerror(errno));
+		return -EFAULT;
+	}
+#endif
 		/* Wait for the rfb processing thread to finish it's work */
 		pthread_mutex_lock(&mutex);
 		pthread_cond_wait(&cond, &mutex);
 		ikvm->dont_wait = true;
-
+		
+#if 1//def FIX1920
 		rfbNewFramebuffer(ikvm->server, ikvm->frame,
 				  ikvm->resolution.width,
 				  ikvm->resolution.height,
 				  BITS_PER_SAMPLE, SAMPLES_PER_PIXEL,
-				  BYTES_PER_PIXEL);
+				  BYTES_PER_PIXEL);	
+#else				  
+		rfbNewFramebuffer(ikvm->server, ikvm->frame,
+				  1920,
+				  1080,
+				  BITS_PER_SAMPLE, SAMPLES_PER_PIXEL,
+				  BYTES_PER_PIXEL);			
+#endif		
+
+#if 1//def FIX1920
 		rfbMarkRectAsModified(ikvm->server, 0, 0,
 				      ikvm->resolution.width,
 				      ikvm->resolution.height);
+#else				  
+		rfbMarkRectAsModified(ikvm->server, 0, 0,
+				  1920,
+				  1080);			
+#endif			
+		
 
 		free(old_frame);
 
 		/* Get the image on the next iteration */
 		ikvm->wait_next = true;
 		pthread_mutex_unlock(&mutex);
-		DESPRINTF("%s","wait 2 sec");
-		sleep(2);
+		DESPRINTF("%s","wait 1 sec");
+		sleep(1);
 		return 0;
 	}
+#if 0
+	rv = select(ikvm->videodev_fd + 1, &set, NULL, NULL, &timeout);
+	if(rv == -1)
+	{
+		perror("select"); /* an error accured */
+		return -EFAULT;
+	}
+	else if(rv == 0)
+	{
+		printf("timeout"); /* a timeout occured */
+		return 0;
+	}    
+	else
+	{
+		rc = read(ikvm->videodev_fd, ikvm->frame, ikvm->frame_buf_size);
+		if (rc < 0) {
+			printf("failed to read frame: %d %s\n", errno,
+			strerror(errno));
+		return -EFAULT;
+		}
+			if (rc != ikvm->frame_size)
+				DBG("new frame size: %d\n", rc);
 
+			ikvm->frame_size = rc;
+			send_frame_to_clients(ikvm);
+
+			return 0;
+	}
+#else
 	rc = read(ikvm->videodev_fd, ikvm->frame, ikvm->frame_buf_size);
 	if (rc < 0) {
 		printf("failed to read frame: %d %s\n", errno,
-		       strerror(errno));
-		return -EFAULT;
+		strerror(errno));
+	return -EFAULT;
 	}
+		if (rc != ikvm->frame_size)
+			DBG("new frame size: %d\n", rc);
 
-	if (rc != ikvm->frame_size)
-		DBG("new frame size: %d\n", rc);
+		ikvm->frame_size = rc;
+		send_frame_to_clients(ikvm);
 
-	ikvm->frame_size = rc;
-	send_frame_to_clients(ikvm);
+		return 0;	
+#endif
 
-	return 0;
+
 }
 
 static void dump_frame(struct obmc_ikvm *ikvm)
@@ -980,6 +1135,7 @@ int main(int argc, char **argv)
 //	struct timespec end;
 //	struct timespec start;
 	pthread_t rfb;
+	//struct v4l2_dv_timings timings;
 
 	memset(&ikvm, 0, sizeof(struct obmc_ikvm));
 	ikvm.frame_rate = 30;
@@ -1062,6 +1218,7 @@ int main(int argc, char **argv)
 	if (rc)
 		goto done;
 
+
 	if (ikvm.input_name) {
 		init_input(&ikvm);
 	} else {
@@ -1075,6 +1232,26 @@ int main(int argc, char **argv)
 	signal(SIGINT, int_handler);
 
 	pthread_create(&rfb, NULL, threaded_process_rfb, &ikvm);
+
+#if 0
+
+	rc = ioctl(ikvm.videodev_fd, VIDIOC_G_DV_TIMINGS, &timings);
+	if (rc < 0) {
+		printf("failed to query format: %d %s\n", errno,
+		       strerror(errno));
+		goto done;
+	}	
+	timings.bt.width=init_width; 
+	timings.bt.height=init_height;
+	
+
+	rc = ioctl(ikvm.videodev_fd, VIDIOC_S_DV_TIMINGS, &timings);
+	if (rc < 0) {
+		printf("failed to query format: %d %s\n", errno,
+		       strerror(errno));
+		goto done;
+	}
+#endif
 
 	while (ok) {
 		if (ikvm.delay_count)
@@ -1161,3 +1338,4 @@ done:
 
 	return rc;
 }
+
